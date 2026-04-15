@@ -52,21 +52,6 @@ class L1_Charbonnier_loss(nn.Module):
         loss = torch.mean(error) 
         return loss
 
-@torch.jit.script
-def gauss_noise_torch(img: torch.Tensor) -> torch.Tensor:
-    img = torch_zscore_normalize(img)
-    
-    # sigma is now a scalar tensor
-    sigma = torch.rand(1) * 0.25
-
-    # Generate Gaussian noise
-    noise = sigma * torch.randn_like(img)
-
-    # Add noise to the image
-    out = img + noise
-
-    return out
-
 class hfm(torch.nn.Module):
     def __init__(self, scale=2):
         super(hfm, self).__init__()
@@ -268,27 +253,8 @@ class TEM_denoiser_main(pl.LightningModule):
         elif self.loss_F == 'Mix':
             return MixedLoss()     
 
-    def noise_estimation(self,frames, mu_x):
-        noise_est_out = self.auxilary_net_sigma(frames)
-        return noise_est_out[:,0,:,:].unsqueeze(1), noise_est_out[:,1,:,:].unsqueeze(1)
-
     def on_train_start(self):
         self.logger.log_hyperparams(self.hparams, {"hp/metric_1": 0, "hp/metric_2": 0})
-
-    def add_noise_at_intervals(self,image, interval=8):
-        # Generate random noise
-        noise = torch.randn_like(image)
-        
-        # Add noise to the original image and its 8-pixel distant neighbor
-        for i in range(image.size(0)):
-            for j in range(image.size(1)):
-                image[i, j] += noise[i, j]
-                for x in range(i - interval, i + interval + 1):
-                    for y in range(j - interval, j + interval + 1):
-                        dist = ((x - i)**2 + (y - j)**2)**0.5
-                        if dist < interval and (x, y) != (i, j):
-                            image[x % image.size(0), y % image.size(1)] += noise[i, j]
-        return image
 
     def train_dataloader(self):
         train_loader = DataLoader(self.Trainset, batch_size=self.batch_size, shuffle=True, pin_memory=True, 

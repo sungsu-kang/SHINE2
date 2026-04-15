@@ -12,6 +12,31 @@ This is the code for our paper, "Self-supervised machine-learning framework for 
 
 Datasets for our paper are available on Zenodo at https://zenodo.org/records/14922032.
 
+## Long-range structured-noise workflow (recommended)
+
+This repository is now configured to run a focused SHINE workflow for long-range random pattern noise removal using an annular blind spot.  
+For your case, set the annulus to `--annulus_inner=7 --annulus_outer=12` to suppress broadly correlated noise in that offset range.
+
+Use the dedicated script:
+<pre>
+<code>sh Scripts/train_script_long_range.sh
+</code>
+</pre>
+
+Or run directly:
+<pre>
+<code>python3 main.py \
+        --common_path=./Experiment/long_range_pattern_denoising \
+        --training_path=./Datasets/Au \
+        --data_path_test=./Datasets/Au \
+        --annulus_inner=7 \
+        --annulus_outer=12 \
+        --base_dilation=0 \
+        --train=1 \
+        --test=1
+</code>
+</pre>
+
 ## Installation
 We recommend using a virtual environment for both training and inference.
 
@@ -35,7 +60,7 @@ We provide `Noise_Statistics.ipynb` to estimate the noise statistics of images a
 
 ![](noise_statistics.png)
 
-Spatial correlation heatmap suggests that using a 3x3 blind-spot size would be suitable for effictive denoising.
+Spatial correlation heatmap helps choose a suitable annulus range (for example, inner/outer radii such as 7/12) for long-range structured-noise suppression.
 
 ### 2. Training & Inference
 Run the following commands in the terminal with the parameters described below, or create a shell script for convenience.
@@ -45,8 +70,10 @@ Run the following commands in the terminal with the parameters described below, 
 * `gt_path`: Path to the ground truth dataset, if available.
 * `data_path_test`: Path to the dataset for inference.
 * `save_folder_name`: Name of the folder where results will be saved (e.g, `experiment`).
-* `version_folder_name`: Version name of the current experiment (e.g., `3x3_blind_spot`).
-* `model`: Blind-spot size of the network (e.g., `3x3_blind`, `1x1_blind`).
+* `version_folder_name`: Version name of the current experiment (e.g., `annular_7_12`).
+* `annulus_inner`: Inner annulus radius (e.g., `7`).
+* `annulus_outer`: Outer annulus radius (e.g., `12`).
+* `base_dilation`: Backbone dilation scale for SHINE blocks (default: `0`).
 * `img_size`: Size of the cropped images used during training (e.g., `256` for 256x256 images).
 * `batch_size`: Batch size (default: `32`).
 * `max_epochs`: Total number of training epochs (default: `200`).
@@ -67,13 +94,15 @@ Run the following commands in the terminal with the parameters described below, 
 Example usage for Au nanoparticle in GLC dataset:
 <pre>
 <code>python3 main.py 
-        --common_path=./Experiment/Au_3x3_denoising \
+        --common_path=./Experiment/Au_annular_denoising \
         --training_path=./Datasets/Au \
         --gt_path=./Datasets/Au \
         --data_path_test=./Datasets/Au \
         --save_folder_name=experiment \
-        --version_folder_name=3x3_blind_spot \
-        --model=3x3_blind \
+        --version_folder_name=annular_7_12 \
+        --annulus_inner=7 \
+        --annulus_outer=12 \
+        --base_dilation=0 \
         --img_size=256 \
         --batch_size=16 \
         --max_epochs=100 \
@@ -117,8 +146,10 @@ Example usage for Cryo-ET dataset (using multiple gpus):
         --patch_size=1024 \
         --patch_stride=768 \
         --save_folder_name=experiment \
-        --version_folder_name=5x5_blind_spot \
-        --model=5x5_blind \
+        --version_folder_name=annular_7_12 \
+        --annulus_inner=7 \
+        --annulus_outer=12 \
+        --base_dilation=0 \
         --img_size=256 \
         --batch_size=8 \
         --max_epochs=100 \
@@ -145,13 +176,15 @@ Pre-trained models are available in the `Experiment` folder for testing purposes
 Example usage for Au nanoparticle in GLC dataset:
 <pre>
 <code>python3 main.py \
-        --common_path=./Experiment/Au_3x3_denoising \
+        --common_path=./Experiment/Au_annular_denoising \
         --training_path=./Datasets/Au \
         --gt_path=./Datasets/Au \
         --data_path_test=./Datasets/Au \
         --save_folder_name=experiment \
-        --version_folder_name=3x3_blind_spot \
-        --model=3x3_blind \
+        --version_folder_name=annular_7_12 \
+        --annulus_inner=7 \
+        --annulus_outer=12 \
+        --base_dilation=0 \
         --img_size=256 \
         --batch_size=8 \
         --max_epochs=10 \
@@ -162,7 +195,7 @@ Example usage for Au nanoparticle in GLC dataset:
         --train=0 \
         --test=1 \
         --gpus=1 \
-        --ckpt_path=./Experiment/Au_3x3_denoising/model/epoch=38.ckpt
+        --ckpt_path=./Experiment/Au_annular_denoising/model/epoch=38.ckpt
 </code>
 </pre>
 or simply run:

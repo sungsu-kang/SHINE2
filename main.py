@@ -2,18 +2,13 @@ import os
 import datetime
 import argparse
 import pytorch_lightning as pl
-from pytorch_lightning.utilities.types import EVAL_DATALOADERS
 from Nets.Blindspot_Net import *
-from Nets.UDVD import *
-from Nets.UDVD_double import *
-from Nets.UNet import *
-from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.strategies import DDPStrategy
 from Trainer.TEM_denoiser_patch_main import TEM_denoiser_main
 from Utils.patch_generator_5frame import *
 from Utils.Dataloader_mrc import *
-from Utils.Dataloader_N2V import *
 from Utils.Dataloader_plain import *
 from sys import platform
 import torch
@@ -57,14 +52,13 @@ def cli_main():
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--common_path', type=str, default='./Experiment/Au_3x3_denoising')
+    parser.add_argument('--common_path', type=str, default='./Experiment/long_range_pattern_denoising')
     parser.add_argument('--training_path', type=str, default='./Datasets/Au')
     parser.add_argument('--gt_path', type=str, default=None)
     parser.add_argument('--data_path_test', type=str, default='./Datasets/Au')
     parser.add_argument('--save_folder_name', type=str,
                         default='experiment')
-    parser.add_argument('--version_folder_name', type=str,
-                        default='3x3_blind_spot')
+    parser.add_argument('--version_folder_name', type=str, default='annular_7_12')
 
     # -------------
     # training_args
@@ -106,19 +100,13 @@ def cli_main():
     parser.add_argument('--patch_ratio', type=float, default=0.01)
 
     # ------------
-    # select_model
+    # annular model args
     # ------------
-
-    # 3x3_blind(default), 1x1_blind, 5x5_blind, N2V, UDVD
-    parser.add_argument('--model', type=str, default='3x3_blind')
-    # Annular blind spot: use for (A) training a stage-2-only annular model with --annulus_blind, or
-    # (B) architecture of stage 2 when using two-stage inference (--ckpt_annular + --ckpt_path).
-    parser.add_argument('--annulus_blind', action='store_true', help='Train/use single SHINE with annular ParamConv (stage-2-only training)')
-    parser.add_argument('--annulus_inner', type=int, default=7, help='Annulus inner radius r (49 <= dx^2+dy^2 <= outer^2 masked)')
-    parser.add_argument('--annulus_outer', type=int, default=12, help='Annulus outer radius (pixels, Euclidean on grid)')
-    # Two-stage: conventional checkpoint (--ckpt_path) then annular (--ckpt_annular) on conventionally denoised data.
-    parser.add_argument('--ckpt_annular', type=str, default=None, help='Stage-2 annular SHINE checkpoint; requires --ckpt_path and implies stage1 is conventional (no annulus)')
-    parser.add_argument('--stage2_model', type=str, default=None, help='Blind-spot size for stage 2, e.g. 3x3_blind (default: same as --model)')
+    parser.add_argument('--annulus_inner', type=int, default=7, help='Annulus inner radius r')
+    parser.add_argument('--annulus_outer', type=int, default=12, help='Annulus outer radius r')
+    parser.add_argument('--base_dilation', type=int, default=0, help='Backbone dilation scale for SHINE blocks')
+    parser.add_argument('--ckpt_annular', type=str, default=None, help='Optional stage-2 annular SHINE checkpoint for two-stage annular inference')
+    parser.add_argument('--stage2_base_dilation', type=int, default=None, help='Stage-2 backbone dilation (defaults to --base_dilation)')
 
     # ------------
     # generated_folder_name
@@ -155,71 +143,53 @@ def cli_main():
                                patch_stride, 1, frames=1, processor_num=args.processor_num, ratio=args.patch_ratio)
             print('------generate_patch_finished------')
     
-    # ------------
-    # model
-    # ------------
-
-    print('-----train_with_model_type-------', args.model)
-    additional_dilation_i = 0
-    additional_dilation_j = 0
+    print('-----annular_only_pipeline-------')
+    additional_dilation_i = int(args.base_dilation)
+    additional_dilation_j = int(args.base_dilation)
     second_network = None
     second_additional_dilation_i = 0
     second_additional_dilation_j = 0
 
-    if args.ckpt_annular and args.annulus_blind:
-        raise ValueError('Use either --annulus_blind (single annular SHINE) or --ckpt_annular (two-stage), not both.')
+    if args.file_type == 'UDVD_e' or args.file_type == 'UDVD_mrc':
+        raise ValueError("UDVD file types are legacy paths and are disabled in the long-range pipeline.")
+    if args.annulus_inner > args.annulus_outer:
+        raise ValueError('--annulus_inner must be <= --annulus_outer')
 
-    if args.model == 'UDVD' or args.file_type == 'UDVD_e':
-        network = BlindVideoNet(channels_per_frame=args.in_channels, out_channels=args.out_channels, bias=False, blind=True, sigma_known=False)
-    elif args.model == 'UDVD_e':
-        network = BlindVideoNet_e(channels_per_frame=args.in_channels, out_channels=args.out_channels, bias=False, blind=True, sigma_known=False)
-    elif args.model == 'N2V':
-        network = UNet(in_channels=args.in_channels, out_channels=args.out_channels)
+    if args.ckpt_annular:
+        network = SHINE(
+            args.in_channels,
+            args.out_channels,
+            add_dilation=(additional_dilation_i, additional_dilation_j),
+            frame_num=args.frame_num,
+            filter=args.filter,
+            blocks=args.blocks,
+            Bias=False,
+            annulus=(args.annulus_inner, args.annulus_outer),
+        )
+        d2 = args.stage2_base_dilation if args.stage2_base_dilation is not None else args.base_dilation
+        second_additional_dilation_i = int(d2)
+        second_additional_dilation_j = int(d2)
+        second_network = SHINE(
+            args.in_channels,
+            args.out_channels,
+            add_dilation=(second_additional_dilation_i, second_additional_dilation_j),
+            frame_num=args.frame_num,
+            filter=args.filter,
+            blocks=args.blocks,
+            Bias=False,
+            annulus=(args.annulus_inner, args.annulus_outer),
+        )
     else:
-        additional_dilation_i = int(args.model.split('x')[0])//2
-        additional_dilation_j = int(args.model.split('x')[1].split('_')[0])//2
-        if args.annulus_inner > args.annulus_outer:
-            raise ValueError('--annulus_inner must be <= --annulus_outer')
-
-        if args.ckpt_annular:
-            # Stage 1: conventional n×n blind spot only (no annulus).
-            network = SHINE(
-                args.in_channels,
-                args.out_channels,
-                add_dilation=(additional_dilation_i, additional_dilation_j),
-                frame_num=args.frame_num,
-                filter=args.filter,
-                blocks=args.blocks,
-                Bias=False,
-                annulus=None,
-            )
-            m2 = args.stage2_model or args.model
-            second_additional_dilation_i = int(m2.split('x')[0]) // 2
-            second_additional_dilation_j = int(m2.split('x')[1].split('_')[0]) // 2
-            second_network = SHINE(
-                args.in_channels,
-                args.out_channels,
-                add_dilation=(second_additional_dilation_i, second_additional_dilation_j),
-                frame_num=args.frame_num,
-                filter=args.filter,
-                blocks=args.blocks,
-                Bias=False,
-                annulus=(args.annulus_inner, args.annulus_outer),
-            )
-        else:
-            annulus = None
-            if args.annulus_blind:
-                annulus = (args.annulus_inner, args.annulus_outer)
-            network = SHINE(
-                args.in_channels,
-                args.out_channels,
-                add_dilation=(additional_dilation_i, additional_dilation_j),
-                frame_num=args.frame_num,
-                filter=args.filter,
-                blocks=args.blocks,
-                Bias=False,
-                annulus=annulus,
-            )
+        network = SHINE(
+            args.in_channels,
+            args.out_channels,
+            add_dilation=(additional_dilation_i, additional_dilation_j),
+            frame_num=args.frame_num,
+            filter=args.filter,
+            blocks=args.blocks,
+            Bias=False,
+            annulus=(args.annulus_inner, args.annulus_outer),
+        )
     
     # ------------
     # dataloader_train_val
@@ -235,16 +205,9 @@ def cli_main():
     std_train = None
     maximum_train = None
     if args.train:
-        if args.file_type == 'mrc' or args.file_type == 'large' or args.file_type == 'single' or args.file_type == 'UDVD_mrc' or args.file_type == 'dm4':
+        if args.file_type == 'mrc' or args.file_type == 'large' or args.file_type == 'single' or args.file_type == 'dm4':
             Trainset, Validationset = Sequentialloader(args.patches_folder, args.img_size, gt_path=args.gt_path,
                                                 validation_length=2*args.batch_size, recursive_factor=args.recursive_factor, frame_num=args.frame_num)
-            train_loader = DataLoader(Trainset, batch_size=args.batch_size, shuffle=True, pin_memory=True,
-                                        num_workers=args.processor_num, drop_last=True, persistent_workers=True)
-            validation_loader = DataLoader(Validationset, batch_size=args.batch_size, shuffle=False, pin_memory=True,
-                                            num_workers=args.processor_num, drop_last=False, persistent_workers=True)
-        elif args.model == 'N2V':
-            Trainset, Validationset = Sequentialloader_N2V(args.training_path, args.img_size, gt_path=args.gt_path,
-                                                validation_length=2*args.batch_size, recursive_factor=args.recursive_factor)
             train_loader = DataLoader(Trainset, batch_size=args.batch_size, shuffle=True, pin_memory=True,
                                         num_workers=args.processor_num, drop_last=True, persistent_workers=True)
             validation_loader = DataLoader(Validationset, batch_size=args.batch_size, shuffle=False, pin_memory=True,
@@ -272,8 +235,6 @@ def cli_main():
             Testset = TestLoader_large(args.data_path_test, subset=args.subset_size, frame_num=args.frame_num)
         elif args.file_type == 'single':
             Testset = TestLoader_single(args.data_path_test, subset=args.subset_size)
-        elif args.file_type == 'UDVD_mrc':
-            Testset = TestLoader_mrc(args.data_path_test, subset=args.subset_size, gain_dir=args.gain_path)
         else:
             Testset = TestLoader_plain(args.data_path_test, frame_num=args.frame_num)
 
@@ -290,10 +251,10 @@ def cli_main():
     if args.ckpt_annular:
         if args.train:
             raise ValueError(
-                '--ckpt_annular is inference-only. Train stage 1 and stage 2 in separate runs without --ckpt_annular.'
+                '--ckpt_annular is inference-only. Train stage 1 and stage 2 annular models in separate runs without --ckpt_annular.'
             )
         if second_network is None:
-            raise ValueError('--ckpt_annular requires SHINE (--model e.g. 3x3_blind).')
+            raise ValueError('--ckpt_annular requires annular SHINE model setup.')
 
     if args.train or args.test:
         model = TEM_denoiser_main(
@@ -305,7 +266,7 @@ def cli_main():
             training_path=args.training_path,
             save_folder=args.common_path + '/' + args.save_folder_name,
             time_stamp=args.time_stamp,
-            model_type=args.model,
+            model_type='annular_shine',
             learning_rate=args.learning_rate,
             batch_size=args.batch_size,
             lossF=args.loss_function,
@@ -358,14 +319,14 @@ def cli_main():
         # ------------
 
         if args.ckpt_path is None:
-            if args.file_type == 'mrc' or args.file_type == 'dm4' or args.file_type == 'large' or args.file_type == 'single' or args.file_type == 'UDVD_mrc':
+            if args.file_type == 'mrc' or args.file_type == 'dm4' or args.file_type == 'large' or args.file_type == 'single':
                 dm = Dataloader_denoiser()
                 trainer.fit(model)
             else:
                 dm = Dataloader_denoiser()
                 trainer.fit(model)
         else:
-            if args.file_type == 'mrc' or args.file_type == 'dm4' or args.file_type == 'large' or args.file_type == 'single' or args.file_type == 'UDVD_mrc':
+            if args.file_type == 'mrc' or args.file_type == 'dm4' or args.file_type == 'large' or args.file_type == 'single':
                 dm = Dataloader_denoiser()
                 trainer.fit(model,  ckpt_path=args.ckpt_path)
             else:
@@ -388,7 +349,7 @@ def cli_main():
 
         if args.ckpt_annular:
             if not args.ckpt_path:
-                raise ValueError('Two-stage inference requires --ckpt_path (conventional SHINE) and --ckpt_annular.')
+                raise ValueError('Two-stage inference requires --ckpt_path (stage 1 annular SHINE) and --ckpt_annular (stage 2 annular SHINE).')
             _load_inner_shine_from_pl_checkpoint(args.ckpt_path, model.model)
             _load_inner_shine_from_pl_checkpoint(args.ckpt_annular, model.second_model)
             ck_infer = None
@@ -396,14 +357,14 @@ def cli_main():
             ck_infer = args.ckpt_path if args.ckpt_path is not None else 'best'
 
         if ck_infer is not None:
-            if args.file_type == 'mrc' or args.file_type == 'UDVD_mrc':
+            if args.file_type == 'mrc':
                 dm = Dataloader_denoiser_test()
                 trainer.test(model, ckpt_path=ck_infer)
             else:
                 dm = Dataloader_denoiser_test()
                 trainer.predict(model, ckpt_path=ck_infer)
         else:
-            if args.file_type == 'mrc' or args.file_type == 'UDVD_mrc':
+            if args.file_type == 'mrc':
                 dm = Dataloader_denoiser_test()
                 trainer.test(model, ckpt_path=None)
             else:
